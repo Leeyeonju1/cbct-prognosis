@@ -1,0 +1,21 @@
+checkpoints/
+
+wandb/
+
+
+
+*.pt
+
+*.pth
+
+*.ckpt
+
+
+
+__pycache__/
+
+*.pyc
+
+.ipynb_checkpoints/
+
+Dataset A - Overview.xlsx
