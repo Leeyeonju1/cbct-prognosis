@@ -40,6 +40,8 @@ class PrognosisDataset(Dataset):
         target_shape=None,
         augment=False,
         use_tooth_metadata=False,
+        use_global_branch=False,
+        global_downsample_factor=1,
         rotation_degrees=10.0,
         translation_voxels=6.0,
         spatial_aug_prob=0.5,
@@ -54,6 +56,10 @@ class PrognosisDataset(Dataset):
 
         self.augment = bool(augment)
         self.use_tooth_metadata = bool(use_tooth_metadata)
+        self.use_global_branch = bool(use_global_branch)
+        self.global_downsample_factor = int(global_downsample_factor)
+        if self.global_downsample_factor < 1:
+            raise ValueError("global_downsample_factor must be >= 1.")
         self.rotation_degrees = float(rotation_degrees)
         self.translation_voxels = float(translation_voxels)
         self.spatial_aug_prob = float(spatial_aug_prob)
@@ -531,6 +537,28 @@ class PrognosisDataset(Dataset):
             "original_shape": original_shape,
             "path": str(sample["image"]),
         }
+
+        if self.use_global_branch and "full_image" in sample:
+            full_img = nib.load(sample["full_image"]).get_fdata().astype(np.float32)
+
+            if self.global_downsample_factor > 1:
+                zoom = [
+                    1.0 / self.global_downsample_factor,
+                    1.0 / self.global_downsample_factor,
+                    1.0 / self.global_downsample_factor,
+                ]
+                full_img = ndi.zoom(
+                    full_img,
+                    zoom=zoom,
+                    order=1,
+                    mode="constant",
+                    prefilter=False,
+                )
+
+            full_img = self.normalize_intensity(full_img, self.train_stats)
+            output["global_image"] = torch.from_numpy(
+                full_img.copy()
+            ).float().unsqueeze(0)
 
         if self.use_tooth_metadata:
             if "tooth_number" not in sample:
