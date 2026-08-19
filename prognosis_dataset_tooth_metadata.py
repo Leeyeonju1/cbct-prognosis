@@ -590,4 +590,20 @@ class PrognosisDataset(Dataset):
                 dtype=torch.long,
             )
 
+        if "annotation_targets" in sample:
+            output["annotation_targets"] = torch.tensor(
+                np.asarray(sample["annotation_targets"], dtype=np.int64),
+                dtype=torch.long,
+            )
+            output["annotation_mask"] = torch.tensor(
+                np.asarray(
+                    sample.get(
+                        "annotation_mask",
+                        np.ones_like(sample["annotation_targets"]),
+                    ),
+                    dtype=np.float32,
+                ),
+                dtype=torch.float32,
+            )
+
         return output

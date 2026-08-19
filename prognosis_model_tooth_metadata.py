@@ -150,6 +150,7 @@ class DualBranchPrognosisModel(nn.Module):
         self,
         in_channels=1,
         num_classes=2,
+        num_annotation_tasks=0,
         dropout=0.3,
         metadata_dim=4,
         channels=(16, 32, 64, 128, 256, 512),
@@ -162,6 +163,7 @@ class DualBranchPrognosisModel(nn.Module):
         self.use_global_branch = bool(use_global_branch)
         self.channels = tuple(int(x) for x in channels)
         self.metadata_dim = int(metadata_dim)
+        self.num_annotation_tasks = int(num_annotation_tasks)
         self.input_dim = int(in_channels)
 
         def make_unet():
@@ -180,10 +182,18 @@ class DualBranchPrognosisModel(nn.Module):
         image_feature_dim = self.channels[-1]
 
         fusion_dim = 2 * image_feature_dim + self.metadata_dim
-        self.classifier = nn.Sequential(
+        self.prognosis_classifier = nn.Sequential(
             nn.Dropout(dropout),
             nn.Linear(fusion_dim, num_classes),
         )
+
+        self.annotation_classifiers = nn.ModuleList([
+            nn.Sequential(
+                nn.Dropout(dropout),
+                nn.Linear(fusion_dim, 2),
+            )
+            for _ in range(self.num_annotation_tasks)
+        ])
 
     @staticmethod
     def _encoder_feature_vector(encoder, x):
@@ -265,4 +275,17 @@ class DualBranchPrognosisModel(nn.Module):
 
             fused = torch.cat([fused, tooth_features], dim=1)
 
-        return self.classifier(fused)
+        prognosis_logits = self.prognosis_classifier(fused)
+
+        if self.num_annotation_tasks == 0:
+            return prognosis_logits
+
+        annotation_logits = torch.stack(
+            [head(fused) for head in self.annotation_classifiers],
+            dim=1,
+        )
+
+        return {
+            "prognosis": prognosis_logits,
+            "annotations": annotation_logits,
+        }
