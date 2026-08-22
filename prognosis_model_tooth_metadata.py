@@ -8,6 +8,23 @@ import torch.nn as nn
 from UNet import UNet3D
 
 
+class GeM3D(nn.Module):
+    """Learnable generalized-mean pooling for localized 3D features."""
+
+    def __init__(self, p=3.0, eps=1e-6):
+        super().__init__()
+        self.p = nn.Parameter(torch.tensor(float(p)))
+        self.eps = float(eps)
+
+    def forward(self, x):
+        p = self.p.clamp(min=1.0)
+        return torch.mean(
+            x.clamp(min=self.eps).pow(p),
+            dim=(-3, -2, -1),
+            keepdim=True,
+        ).pow(1.0 / p)
+
+
 class PrognosisModel(nn.Module):
     """
     3D CBCT prognosis classifier using the encoder of UNet3D.
@@ -60,9 +77,7 @@ class PrognosisModel(nn.Module):
         self.conv5 = unet.conv5
         self.bottleneck = unet.bottleneck
 
-        self.pool = nn.AdaptiveAvgPool3d(
-            1
-        )
+        self.pool = GeM3D()
 
         image_feature_dim = (
             self.channels[-1]
@@ -178,7 +193,8 @@ class DualBranchPrognosisModel(nn.Module):
         self.local_encoder = make_unet()
         self.global_encoder = make_unet()
 
-        self.pool = nn.AdaptiveAvgPool3d(1)
+        self.local_pool = GeM3D()
+        self.global_pool = GeM3D()
         image_feature_dim = self.channels[-1]
 
         fusion_dim = 2 * image_feature_dim + self.metadata_dim
@@ -195,8 +211,7 @@ class DualBranchPrognosisModel(nn.Module):
             for _ in range(self.num_annotation_tasks)
         ])
 
-    @staticmethod
-    def _encoder_feature_vector(encoder, x):
+    def _encoder_feature_vector(self, encoder, x, pool):
         x = encoder.conv1(x)
         x = encoder.conv2(x)
         x = encoder.conv3(x)
@@ -204,7 +219,7 @@ class DualBranchPrognosisModel(nn.Module):
         x = encoder.conv5(x)
         x = encoder.bottleneck(x)
 
-        x = nn.functional.adaptive_avg_pool3d(x, 1)
+        x = pool(x)
         return torch.flatten(x, 1)
 
     def load_shared_pretrained_encoder(self, state_dict):
@@ -239,6 +254,7 @@ class DualBranchPrognosisModel(nn.Module):
         local_feat = self._encoder_feature_vector(
             self.local_encoder,
             local_x,
+            self.local_pool,
         )
 
         if self.use_global_branch:
@@ -250,6 +266,7 @@ class DualBranchPrognosisModel(nn.Module):
             global_feat = self._encoder_feature_vector(
                 self.global_encoder,
                 global_x,
+                self.global_pool,
             )
         else:
             global_feat = torch.zeros_like(local_feat)

@@ -39,6 +39,7 @@ class PrognosisDataset(Dataset):
         train_stats=None,
         target_shape=None,
         augment=False,
+        tta=False,
         use_tooth_metadata=False,
         use_global_branch=False,
         global_downsample_factor=1,
@@ -50,11 +51,25 @@ class PrognosisDataset(Dataset):
         intensity_shift_fraction=0.05,
         noise_prob=0.30,
         noise_std_fraction=0.01,
+        affine_prob=0.50,
+        scale_range=(0.70, 1.30),
+        shear_range=0.10,
+        elastic_prob=0.20,
+        elastic_sigma_range=(3.0, 7.0),
+        elastic_magnitude_range=(5.0, 15.0),
+        flip_prob=0.50,
+        blur_prob=0.40,
+        blur_sigma_range=(0.5, 1.0),
+        lowres_prob=0.40,
+        lowres_zoom_range=(0.50, 1.0),
+        gamma_prob=0.40,
+        gamma_range=(0.70, 1.50),
     ):
         self.data_dir = Path(data_dir)
         self.train_stats = train_stats
 
         self.augment = bool(augment)
+        self.tta = bool(tta)
         self.use_tooth_metadata = bool(use_tooth_metadata)
         self.use_global_branch = bool(use_global_branch)
         self.global_downsample_factor = int(global_downsample_factor)
@@ -68,6 +83,19 @@ class PrognosisDataset(Dataset):
         self.intensity_shift_fraction = float(intensity_shift_fraction)
         self.noise_prob = float(noise_prob)
         self.noise_std_fraction = float(noise_std_fraction)
+        self.affine_prob = float(affine_prob)
+        self.scale_range = tuple(scale_range)
+        self.shear_range = float(shear_range)
+        self.elastic_prob = float(elastic_prob)
+        self.elastic_sigma_range = tuple(elastic_sigma_range)
+        self.elastic_magnitude_range = tuple(elastic_magnitude_range)
+        self.flip_prob = float(flip_prob)
+        self.blur_prob = float(blur_prob)
+        self.blur_sigma_range = tuple(blur_sigma_range)
+        self.lowres_prob = float(lowres_prob)
+        self.lowres_zoom_range = tuple(lowres_zoom_range)
+        self.gamma_prob = float(gamma_prob)
+        self.gamma_range = tuple(gamma_range)
 
         if samples is None:
             self.samples = []
@@ -171,25 +199,47 @@ class PrognosisDataset(Dataset):
     def __len__(self):
         return len(self.samples)
 
+    def tta_image(self, img):
+        """Apply a light stochastic transform for test-time augmentation."""
+        img = img.astype(np.float32, copy=False)
+        a_min = float(self.train_stats["min"])
+
+        if np.random.rand() < 0.5:
+            img = np.flip(img, axis=np.random.randint(0, 3))
+
+        angle = np.random.uniform(-5.0, 5.0)
+        plane = ((0, 1), (0, 2), (1, 2))[np.random.randint(0, 3)]
+        return ndi.rotate(
+            img,
+            angle=angle,
+            axes=plane,
+            reshape=False,
+            order=1,
+            mode="constant",
+            cval=a_min,
+            prefilter=False,
+        )
+
     def augment_image(self, img):
         """
         Conservative train-only 3D augmentation.
 
         Spatial:
-        - small random rotation in one randomly selected anatomical plane
-        - small translation
+        - random rotation and translation
+        - random scale/shear affine transform
+        - elastic deformation
+        - random axis flip
 
         Intensity:
-        - mild contrast/intensity scaling and shift
-        - mild Gaussian noise
-
-        No random resized crop or spatial scaling is used because absolute
-        lesion/tooth size can carry prognostic information.
+        - contrast/intensity scaling and shift
+        - Gaussian noise and blur
+        - low-resolution simulation and gamma adjustment
         """
         img = img.astype(
             np.float32,
             copy=False,
         )
+        original_shape = img.shape
 
         a_min = float(
             self.train_stats["min"]
@@ -240,6 +290,72 @@ class PrognosisDataset(Dataset):
                 prefilter=False,
             )
 
+        if np.random.rand() < self.affine_prob:
+            scale = np.random.uniform(
+                self.scale_range[0],
+                self.scale_range[1],
+                size=3,
+            )
+            shear = np.random.uniform(
+                -self.shear_range,
+                self.shear_range,
+                size=(3, 3),
+            )
+            np.fill_diagonal(shear, 0.0)
+            matrix = np.diag(scale) @ (np.eye(3) + shear)
+            center = (np.asarray(img.shape) - 1.0) / 2.0
+            offset = center - matrix @ center
+            img = ndi.affine_transform(
+                img,
+                matrix=matrix,
+                offset=offset,
+                output_shape=img.shape,
+                order=1,
+                mode="constant",
+                cval=a_min,
+                prefilter=False,
+            )
+
+        if np.random.rand() < self.elastic_prob:
+            sigma = np.random.uniform(
+                self.elastic_sigma_range[0],
+                self.elastic_sigma_range[1],
+            )
+            magnitude = np.random.uniform(
+                self.elastic_magnitude_range[0],
+                self.elastic_magnitude_range[1],
+            )
+            shape = img.shape
+            coordinates = np.meshgrid(
+                *[np.arange(size, dtype=np.float32) for size in shape],
+                indexing="ij",
+            )
+            for axis in range(3):
+                displacement = ndi.gaussian_filter(
+                    np.random.uniform(-1.0, 1.0, size=shape).astype(np.float32),
+                    sigma=sigma,
+                    mode="nearest",
+                )
+                displacement *= magnitude / max(
+                    float(np.std(displacement)),
+                    1e-6,
+                )
+                coordinates[axis] += displacement
+            img = ndi.map_coordinates(
+                img,
+                coordinates,
+                order=1,
+                mode="constant",
+                cval=a_min,
+                prefilter=False,
+            ).reshape(shape)
+
+        if np.random.rand() < self.flip_prob:
+            img = np.flip(
+                img,
+                axis=np.random.randint(0, 3),
+            )
+
         if np.random.rand() < self.intensity_aug_prob:
             scale = np.random.uniform(
                 self.intensity_scale_range[0],
@@ -273,6 +389,70 @@ class PrognosisDataset(Dataset):
                 scale=noise_std,
                 size=img.shape,
             ).astype(np.float32)
+
+        if np.random.rand() < self.blur_prob:
+            sigma = np.random.uniform(
+                self.blur_sigma_range[0],
+                self.blur_sigma_range[1],
+            )
+            img = ndi.gaussian_filter(
+                img,
+                sigma=(sigma, sigma, sigma),
+            )
+
+        if np.random.rand() < self.lowres_prob:
+            zoom = np.random.uniform(
+                self.lowres_zoom_range[0],
+                self.lowres_zoom_range[1],
+            )
+            lowres = ndi.zoom(
+                img,
+                zoom=zoom,
+                order=1,
+                mode="constant",
+                cval=a_min,
+                prefilter=False,
+            )
+            img = ndi.zoom(
+                lowres,
+                zoom=np.asarray(original_shape) / np.asarray(lowres.shape),
+                order=1,
+                mode="constant",
+                cval=a_min,
+                prefilter=False,
+            )
+            if img.shape != original_shape:
+                fitted = np.full(
+                    original_shape,
+                    a_min,
+                    dtype=np.float32,
+                )
+                common_shape = tuple(
+                    min(current, target)
+                    for current, target in zip(
+                        img.shape,
+                        original_shape,
+                    )
+                )
+                source_slices = tuple(
+                    slice(0, size)
+                    for size in common_shape
+                )
+                fitted[source_slices] = img[source_slices]
+                img = fitted
+            img = img[
+                tuple(slice(0, size) for size in original_shape)
+            ]
+
+        if np.random.rand() < self.gamma_prob:
+            gamma = np.random.uniform(
+                self.gamma_range[0],
+                self.gamma_range[1],
+            )
+            img = np.power(
+                np.clip((img - a_min) / intensity_range, 0.0, 1.0),
+                gamma,
+            ) * intensity_range + a_min
 
         return img.astype(
             np.float32,
@@ -511,6 +691,8 @@ class PrognosisDataset(Dataset):
             img = self.augment_image(
                 img
             )
+        elif self.tta:
+            img = self.tta_image(img)
 
         img = self.normalize_intensity(
             img,
@@ -527,9 +709,10 @@ class PrognosisDataset(Dataset):
             constant_value=pad_value,
         )
 
-        img = torch.from_numpy(
-            img.copy()
-        ).float().unsqueeze(0)
+        img = torch.tensor(
+            img,
+            dtype=torch.float32,
+        ).unsqueeze(0)
 
         output = {
             "image": img,
@@ -556,9 +739,10 @@ class PrognosisDataset(Dataset):
                 )
 
             full_img = self.normalize_intensity(full_img, self.train_stats)
-            output["global_image"] = torch.from_numpy(
-                full_img.copy()
-            ).float().unsqueeze(0)
+            output["global_image"] = torch.tensor(
+                full_img,
+                dtype=torch.float32,
+            ).unsqueeze(0)
 
         if self.use_tooth_metadata:
             if "tooth_number" not in sample:
@@ -577,9 +761,10 @@ class PrognosisDataset(Dataset):
                 dtype=torch.long,
             )
 
-            output["tooth_features"] = torch.from_numpy(
-                tooth_features
-            ).float()
+            output["tooth_features"] = torch.tensor(
+                tooth_features,
+                dtype=torch.float32,
+            )
 
             output["arch"] = arch_name
             output["tooth_type"] = tooth_type
