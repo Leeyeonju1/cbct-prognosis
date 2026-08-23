@@ -56,12 +56,12 @@ RANKING_BANK_SIZE = 64
 RANKING_LOSS_WEIGHT = 0.5
 RANKING_MARGIN = 0.2
 NUM_WORKERS = 8
-NUM_EPOCHS = 200
+NUM_EPOCHS = 300
 SCRATCH_LR = 1e-4
 PRETRAINED_ENCODER_LR = 1e-5
 CLASSIFIER_LR = 1e-4
-WEIGHT_DECAY = 1e-4
-DROPOUT = 0.3
+WEIGHT_DECAY = 1e-2
+DROPOUT = 0.4
 PRELU = False
 GRAD_CLIP_NORM = 5.0
 LR_SCHEDULER_FACTOR = 0.5
@@ -70,7 +70,7 @@ MIN_SCRATCH_LR = 1e-6
 MIN_ENCODER_LR = 1e-7
 MIN_CLASSIFIER_LR = 1e-6
 TTA_PASSES = 5
-CHECKPOINT_TAG = "sampler_auc_v2"
+CHECKPOINT_TAG = "weighted_sampler_auc_v3"
 
 # The stronger augmentation settings used by the notebook's training experiment.
 AUGMENTATION = {
@@ -310,6 +310,15 @@ def compute_metrics(y_true, probabilities, predictions=None):
     return result
 
 
+CLASS_WEIGHTS = None
+
+
+def weighted_cross_entropy(logits, labels):
+    if CLASS_WEIGHTS is None:
+        raise RuntimeError("CLASS_WEIGHTS must be initialized before loss evaluation.")
+    return F.cross_entropy(logits, labels, weight=CLASS_WEIGHTS)
+
+
 def auc_margin_loss(logits, labels, ranking_bank):
     scores = logits[:, 1] - logits[:, 0]
     positives = scores[labels == 1]
@@ -327,7 +336,7 @@ def auc_margin_loss(logits, labels, ranking_bank):
 
 
 def training_loss(logits, labels, ranking_bank):
-    return F.cross_entropy(logits, labels) + RANKING_LOSS_WEIGHT * auc_margin_loss(logits, labels, ranking_bank)
+    return weighted_cross_entropy(logits, labels) + RANKING_LOSS_WEIGHT * auc_margin_loss(logits, labels, ranking_bank)
 
 
 def update_ranking_bank(ranking_bank, logits, labels):
@@ -391,7 +400,7 @@ def evaluate_once(model, loader, device):
         images, global_images, labels, tooth_features = move_batch(batch, device)
         with torch.amp.autocast("cuda", enabled=device.type == "cuda"):
             logits = model(images, global_images, tooth_features)
-            loss = F.cross_entropy(logits, labels)
+            loss = weighted_cross_entropy(logits, labels)
         batch_size = images.size(0)
         seen += batch_size
         total_loss += loss.item() * batch_size
@@ -572,6 +581,12 @@ def main():
     train_labels = np.asarray([x["label"] for x in train_data])
     class_counts = np.bincount(train_labels, minlength=NUM_CLASSES)
     sampler_weights = np.where(train_labels == 1, 0.5 / class_counts[1], 0.5 / class_counts[0])
+    global CLASS_WEIGHTS
+    CLASS_WEIGHTS = torch.as_tensor(
+        len(train_labels) / (NUM_CLASSES * class_counts),
+        dtype=torch.float32,
+        device=device,
+    )
     generator = torch.Generator().manual_seed(SEED)
     sampler = WeightedRandomSampler(torch.as_tensor(sampler_weights, dtype=torch.double), len(train_ds), replacement=True, generator=generator)
     loader_kwargs = {"batch_size": args.batch_size, "num_workers": args.num_workers, "pin_memory": device.type == "cuda", "persistent_workers": args.num_workers > 0}
@@ -610,7 +625,7 @@ def main():
         "ranking_margin": RANKING_MARGIN, "ranking_bank_size": RANKING_BANK_SIZE, "scratch_lr": SCRATCH_LR,
         "pretrained_encoder_lr": PRETRAINED_ENCODER_LR, "classifier_lr": CLASSIFIER_LR,
         "weight_decay": WEIGHT_DECAY, "grad_clip_norm": GRAD_CLIP_NORM, "class_counts_train": class_counts.tolist(),
-        "sampler_weights": sampler_weights.tolist(), "classification_loss": "cross_entropy", "intensity_stats": train_stats, "augmentation": AUGMENTATION,
+        "sampler_weights": sampler_weights.tolist(), "class_weights_loss": CLASS_WEIGHTS.cpu().tolist(), "classification_loss": "weighted_cross_entropy", "intensity_stats": train_stats, "augmentation": AUGMENTATION,
         "train_n": len(train_ds), "val_n": len(val_ds), "test_n": len(test_ds),
     }
     run = None if args.wandb_mode == "disabled" else wandb.init(project=args.wandb_project, name=f"{'pretrained' if use_pretrained else 'scratch'}-{CHECKPOINT_TAG}", mode=args.wandb_mode, config=config)
