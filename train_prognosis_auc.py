@@ -56,11 +56,11 @@ RANKING_BANK_SIZE = 64
 RANKING_LOSS_WEIGHT = 0.5
 RANKING_MARGIN = 0.2
 NUM_WORKERS = 8
-NUM_EPOCHS = 300
+NUM_EPOCHS = 200
 SCRATCH_LR = 1e-4
 PRETRAINED_ENCODER_LR = 1e-5
 CLASSIFIER_LR = 1e-4
-WEIGHT_DECAY = 1e-2
+WEIGHT_DECAY = 1e-3
 DROPOUT = 0.4
 PRELU = False
 GRAD_CLIP_NORM = 5.0
@@ -70,7 +70,7 @@ MIN_SCRATCH_LR = 1e-6
 MIN_ENCODER_LR = 1e-7
 MIN_CLASSIFIER_LR = 1e-6
 TTA_PASSES = 5
-CHECKPOINT_TAG = "weighted_sampler_auc_v3"
+CHECKPOINT_TAG = "weighted_sampler_auc_v4"
 
 # The stronger augmentation settings used by the notebook's training experiment.
 AUGMENTATION = {
